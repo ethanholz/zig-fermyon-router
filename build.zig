@@ -28,7 +28,7 @@ pub const Options = struct {
     author: []const u8,
 };
 
-/// This function generates a `spin.toml` file using the `tools/generate-spin.zig`
+/// This function generates a `spin.toml`
 pub fn generateSpinTOML(b: *std.Build, exe_build_step: *std.Build.Step.Compile, options: Options) void {
     const name = exe_build_step.name;
     const allocator = b.allocator;
