@@ -38,21 +38,43 @@ pub const HttpRequest = struct {
 pub const HttpResponse = struct {
     writer: std.io.AnyWriter = std.io.getStdOut().writer().any(),
     headers: std.ArrayList(std.http.Header),
+    written: bool = false,
+    debug: bool = false,
 
-    pub fn init(allocator: *std.mem.Allocator) HttpResponse {
-        return HttpResponse{ .headers = std.ArrayList(std.http.Header).init(allocator.*) };
+    pub fn init(allocator: *std.mem.Allocator, debug: bool) HttpResponse {
+        var headers = std.ArrayList(std.http.Header).init(allocator.*);
+        // Set the first header as the response status.
+        headers.append(std.http.Header{ .name = "Status", .value = "200 OK" }) catch |err| {
+            std.debug.panic("Error writing to response: {any}\n", .{err});
+        };
+        return HttpResponse{ .headers = headers, .debug = debug };
     }
 
     pub fn deinit(self: *HttpResponse) void {
         self.headers.deinit();
     }
 
-    pub fn writeHeader(self: HttpResponse, status: std.http.Status) !void {
-        try self.writer.print("Status: {d} {s}\n", .{ @intFromEnum(status), status.phrase().? });
+    pub fn writeHeader(self: *HttpResponse, status: std.http.Status) !void {
+        const allocator = std.heap.wasm_allocator;
+        const value = std.fmt.allocPrint(allocator, "{d} {s}", .{ @intFromEnum(status), status.phrase().? }) catch |err| {
+            std.debug.panic("Error formatting status: {any}\n", .{err});
+        };
+        self.headers.items[0] = std.http.Header{ .name = "Status", .value = value };
+        try self.writeHeaders();
+    }
+
+    fn writeHeaders(self: *HttpResponse) !void {
+        if (self.written) {
+            return;
+        }
         for (self.headers.items) |header| {
             try self.writer.print("{s}: {s}\n", .{ header.name, header.value });
+            if (self.debug) {
+                std.debug.print("{s}: {s}\n", .{ header.name, header.value });
+            }
         }
         try self.writer.print("\n", .{});
+        self.written = true;
     }
 
     pub fn addHeader(self: *HttpResponse, key: []const u8, value: []const u8) !void {
@@ -67,17 +89,13 @@ pub const HttpResponse = struct {
         }
     }
 
-    pub fn writeHeaders(self: HttpResponse) !void {
-        for (self.headers.items) |header| {
-            try self.writer.print("{s}: {s}\n", .{ header.name, header.value });
-        }
-    }
-
-    pub fn write(self: HttpResponse, comptime data: []const u8) !usize {
+    pub fn write(self: *HttpResponse, comptime data: []const u8) !usize {
+        try self.writeHeaders();
         return try self.writer.write(data);
     }
 
-    pub fn print(self: HttpResponse, comptime data: []const u8, args: anytype) !void {
+    pub fn print(self: *HttpResponse, comptime data: []const u8, args: anytype) !void {
+        try self.writeHeaders();
         try self.writer.print(data, args);
     }
 };
@@ -85,11 +103,15 @@ pub const HttpResponse = struct {
 pub const Router = struct {
     routes: std.StringArrayHashMap(HttpHandler),
     not_found_handler: HttpHandler = Router.default_404_handler,
+    debug: bool = false,
 
     pub fn new(allocator: std.mem.Allocator) Router {
         return Router{
             .routes = std.StringArrayHashMap(HttpHandler).init(allocator),
         };
+    }
+    pub fn withDebug(self: Router, debug: bool) Router {
+        return Router{ .routes = self.routes, .not_found_handler = self.not_found_handler, .debug = debug };
     }
 
     pub fn deinit(self: *Router) void {
@@ -137,7 +159,7 @@ pub const Router = struct {
         // }
         // std.debug.print("route: {s}\n", .{route});
         var handler = self.routes.get(route) orelse self.not_found_handler;
-        var resp = HttpResponse.init(allocator);
+        var resp = HttpResponse.init(allocator, self.debug);
         const req = HttpRequest.init(allocator, envMap);
         // TODO: This is less than ideal, might want to look at using a context to pass and chain middlewares.
         if (handler == self.not_found_handler) {
@@ -160,6 +182,11 @@ pub const Router = struct {
             }
         }
         handler(req, &resp);
+        if (!resp.written) {
+            resp.writeHeaders() catch |err| {
+                std.debug.panic("Error writing headers to response: {any}", .{err});
+            };
+        }
     }
 
     pub fn with_404_handler(self: *Router, handler: HttpHandler) void {
@@ -167,13 +194,13 @@ pub const Router = struct {
     }
 
     pub fn default_404_handler(_: HttpRequest, response: *HttpResponse) void {
-        // const writer = response.writer();
-        response.print("Status: 404 Not Found\n", .{}) catch |err| {
+        response.addHeader("content-type", "text/plain") catch |err| {
             std.debug.print("Error writing to response: {any}\n", .{err});
         };
-        response.print("content-type: text/plain\n\n", .{}) catch |err| {
+        response.writeHeader(std.http.Status.not_found) catch |err| {
             std.debug.print("Error writing to response: {any}\n", .{err});
         };
+        std.debug.print("{s}: {s}", .{ response.headers.items[0].name, response.headers.items[0].value });
         _ = response.write("404 Not Found") catch |err| {
             std.debug.print("Error writing to response: {any}\n", .{err});
         };
