@@ -22,17 +22,44 @@ const toml =
     \\source = "bin/{s}.wasm"
 ;
 
+const tomlStatic =
+    \\spin_manifest_version = 2
+    \\
+    \\[application]
+    \\name = "{s}"
+    \\version = "{s}"
+    \\description = "{s}"
+    \\authors = ["{s}"]
+    \\
+    \\[application.trigger.http]
+    \\base = "/"
+    \\
+    \\[[trigger.http]]
+    \\id = "trigger-fermyon-router"
+    \\component = "{s}"
+    \\route = "/..."
+    \\executor = {{ type = "wagi" }}
+    \\
+    \\[component.{s}]
+    \\source = "bin/{s}.wasm"
+    \\files = [{{source = "./static/", destination="/"}}]
+;
+
+// files = [{source = "./blog/", destination="/"}]
 pub const Options = struct {
     version: []const u8,
     description: []const u8,
     author: []const u8,
+    static: bool = false,
 };
 
 /// This function generates a `spin.toml`
-pub fn generateSpinTOML(b: *std.Build, exe_build_step: *std.Build.Step.Compile, options: Options) void {
+pub fn generateSpinTOML(b: *std.Build, exe_build_step: *std.Build.Step.Compile, comptime options: Options) void {
     const name = exe_build_step.name;
     const allocator = b.allocator;
-    const str = std.fmt.allocPrint(allocator, toml, .{ name, options.version, options.description, options.author, name, name, name }) catch {
+    const tomlStr: []const u8 = if (options.static) tomlStatic else toml;
+    // const tomlStr = toml;
+    const str = std.fmt.allocPrint(allocator, tomlStr, .{ name, options.version, options.description, options.author, name, name, name }) catch {
         @panic("Failed to generate toml");
     };
     defer allocator.free(str);
@@ -56,12 +83,10 @@ pub fn build(b: *std.Build) void {
     const mime = b.dependency("mime", mode);
 
     // Create a module for the router
-    _ = b.addModule("zig-fermyon-router", .{
+    const module = b.addModule("zig-fermyon-router", .{
         .root_source_file = .{ .path = "src/root.zig" },
     });
-    _ = b.addModule("fermyon-tools", .{
-        .root_source_file = .{ .path = "tools/generate-spin.zig" },
-    });
+    module.addImport("mime", mime.module("mime"));
 
     // Build the main executable for testing
     const exe = b.addExecutable(.{
@@ -70,7 +95,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    exe.root_module.addImport("mime", mime.module("mime"));
+    exe.root_module.addImport("zig-fermyon-router", module);
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
