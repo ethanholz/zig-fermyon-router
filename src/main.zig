@@ -26,8 +26,6 @@ pub fn addHeader(_: HttpRequest, response: *HttpResponse) void {
     };
 }
 
-pub fn testMiddleware(req: HttpRequest, response: *HttpResponse, next: fn (HttpRequest, *HttpResponse) void) void {}
-
 const Body = struct {
     name: []const u8,
 };
