@@ -7,11 +7,11 @@ const Router = fermyon_router.Router;
 const serveFile = fermyon_router.serveFile;
 
 pub fn testHandler(_: HttpRequest, response: *HttpResponse) void {
-    response.addHeaders(.{
-        .{ "content-type", "text/plain" },
-    }) catch |err| {
-        std.debug.print("Error writing to response: {any}\n", .{err});
-    };
+    // response.addHeaders(.{
+    //     .{ "content-type", "text/html" },
+    // }) catch |err| {
+    //     std.debug.print("Error writing to response: {any}\n", .{err});
+    // };
     // response.addHeader("content-type", "text/plain") catch |err| {
     //     std.debug.print("Error writing to response: {any}\n", .{err});
     // };
@@ -19,6 +19,14 @@ pub fn testHandler(_: HttpRequest, response: *HttpResponse) void {
         std.debug.print("Error writing to response: {any}\n", .{err});
     };
 }
+
+pub fn addHeader(_: HttpRequest, response: *HttpResponse) void {
+    response.addHeader("content-type", "application/json") catch |err| {
+        std.debug.print("Error writing to response: {any}\n", .{err});
+    };
+}
+
+pub fn testMiddleware(req: HttpRequest, response: *HttpResponse, next: fn (HttpRequest, *HttpResponse) void) void {}
 
 const Body = struct {
     name: []const u8,
@@ -51,12 +59,9 @@ pub fn testPost(req: HttpRequest, response: *HttpResponse) void {
     defer decoded.deinit();
     const name = decoded.value.name;
 
-    response.addHeader("content-type", "text/plain") catch |err| {
-        std.debug.print("Error writing to response: {any}\n", .{err});
-    };
-    response.writeHeader(std.http.Status.ok) catch |err| {
-        std.debug.print("Error writing to response: {any}\n", .{err});
-    };
+    // response.addHeader("content-type", "text/plain") catch |err| {
+    //     std.debug.print("Error writing to response: {any}\n", .{err});
+    // };
     response.print("Hello, {s}!", .{name}) catch |err| {
         std.debug.print("Error writing to response: {any}\n", .{err});
     };
@@ -67,8 +72,13 @@ pub fn main() !void {
     var router = Router.new(allocator).withDebug(true);
     defer router.deinit();
 
+    // try router.addRoute("/api/testing", testHandler);
     try router.addRoute("/api/testing", testHandler);
+    try router.methods("/api/testing", .{
+        "POST",
+        std.http.Method.GET,
+    });
     try router.addRoute("/hello", testPost);
-    // try router.createStaticRoutes(std.fs.cwd());
+    try router.post("/hello");
     try router.routeRequest(&allocator);
 }

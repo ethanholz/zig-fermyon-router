@@ -2,7 +2,17 @@ const std = @import("std");
 const mime = @import("mime");
 
 /// A function that handles an HTTP request.
-pub const HttpHandler = *const fn (HttpRequest, *HttpResponse) void;
+pub const HttpHandlerFunc = *const fn (HttpRequest, *HttpResponse) void;
+
+/// HandlerStruct
+pub const HttpHandler = struct {
+    handler: HttpHandlerFunc,
+    methods: ?std.ArrayList(std.http.Method) = null,
+
+    pub fn init(handler: HttpHandlerFunc) HttpHandler {
+        return HttpHandler{ .handler = handler };
+    }
+};
 
 /// A request to an HTTP server.
 pub const HttpRequest = struct {
@@ -95,6 +105,20 @@ pub const HttpResponse = struct {
     }
 
     pub fn print(self: *HttpResponse, comptime data: []const u8, args: anytype) !void {
+        outer: {
+            if (!self.written) {
+                const headers = self.headers;
+                for (headers.items) |header| {
+                    if (std.mem.eql(u8, header.name, "content-type")) {
+                        break :outer;
+                    }
+                }
+            }
+            // Set the content type to text/plain if it hasn't been set.
+            self.addHeader("content-type", "text/plain") catch |err| {
+                std.debug.print("Error writing to response: {any}\n", .{err});
+            };
+        }
         try self.writeHeaders();
         try self.writer.print(data, args);
     }
@@ -102,12 +126,14 @@ pub const HttpResponse = struct {
 
 pub const Router = struct {
     routes: std.StringArrayHashMap(HttpHandler),
-    not_found_handler: HttpHandler = Router.default_404_handler,
+    not_found_handler: HttpHandler,
     debug: bool = false,
 
     pub fn new(allocator: std.mem.Allocator) Router {
+        const not_found_handler = HttpHandler.init(default_404_handler);
         return Router{
             .routes = std.StringArrayHashMap(HttpHandler).init(allocator),
+            .not_found_handler = not_found_handler,
         };
     }
     pub fn withDebug(self: Router, debug: bool) Router {
@@ -118,7 +144,9 @@ pub const Router = struct {
         self.routes.deinit();
     }
 
-    pub fn addRoute(self: *Router, route: []const u8, handler: HttpHandler) !void {
+    pub fn addRoute(self: *Router, route: []const u8, handlerFunc: HttpHandlerFunc) !void {
+        if (self.routes.get(route) != null) return;
+        const handler = HttpHandler.init(handlerFunc);
         try self.routes.put(route, handler);
     }
 
@@ -150,19 +178,54 @@ pub const Router = struct {
         }
     }
 
+    pub fn get(self: *Router, route: []const u8) !void {
+        try self.method(route, std.http.Method.GET);
+    }
+
+    pub fn post(self: *Router, route: []const u8) !void {
+        try self.method(route, std.http.Method.POST);
+    }
+
+    pub fn method(self: *Router, route: []const u8, met: std.http.Method) !void {
+        const entry = self.routes.getEntry(route);
+        if (entry == null) {
+            return;
+        }
+        const mets = &entry.?.value_ptr.methods;
+        if (mets.* == null) {
+            mets.* = std.ArrayList(std.http.Method).init(std.heap.wasm_allocator);
+        }
+        try mets.*.?.append(met);
+    }
+
+    pub fn methods(self: *Router, route: []const u8, mets: anytype) !void {
+        const entry = self.routes.getEntry(route);
+        if (entry == null) {
+            return;
+        }
+        const internal_methods = &entry.?.value_ptr.methods;
+        if (internal_methods.* == null) {
+            internal_methods.* = std.ArrayList(std.http.Method).init(std.heap.wasm_allocator);
+        }
+        inline for (mets) |met| {
+            if (@TypeOf(met) != std.http.Method) {
+                const item = std.http.Method.parse(met);
+                try internal_methods.*.?.append(@enumFromInt(item));
+            } else {
+                try internal_methods.*.?.append(met);
+            }
+        }
+    }
+
     pub fn routeRequest(self: *Router, allocator: *std.mem.Allocator) !void {
         var envMap = try std.process.getEnvMap(allocator.*);
         defer envMap.deinit();
         const route = envMap.get("PATH_INFO").?;
-        // for (self.routes.keys()) |key| {
-        //     std.debug.print("key: {s}\n", .{key});
-        // }
-        // std.debug.print("route: {s}\n", .{route});
         var handler = self.routes.get(route) orelse self.not_found_handler;
         var resp = HttpResponse.init(allocator, self.debug);
         const req = HttpRequest.init(allocator, envMap);
         // TODO: This is less than ideal, might want to look at using a context to pass and chain middlewares.
-        if (handler == self.not_found_handler) {
+        if (handler.handler == self.not_found_handler.handler) {
             const last = route[route.len - 1];
             if (last != '/') {
                 const concat = std.mem.concat(allocator.*, u8, &[_][]const u8{ route, "/" }) catch |err| {
@@ -170,7 +233,7 @@ pub const Router = struct {
                     return;
                 };
                 handler = self.routes.get(concat) orelse self.not_found_handler;
-                if (handler != self.not_found_handler) {
+                if (handler.handler != self.not_found_handler.handler) {
                     resp.addHeader("Location", concat) catch |err| {
                         std.debug.print("Error writing to response: {any}\n", .{err});
                     };
@@ -181,7 +244,24 @@ pub const Router = struct {
                 }
             }
         }
-        handler(req, &resp);
+        if (self.debug) {
+            std.debug.print("handler: {any}\n", .{handler.methods});
+        }
+        outer: {
+            if (handler.methods != null) {
+                const met = std.http.Method.parse(req.method().?);
+                for (handler.methods.?.items) |item| {
+                    if (met == @intFromEnum(item)) {
+                        break :outer;
+                    }
+                }
+                resp.writeHeader(std.http.Status.method_not_allowed) catch |err| {
+                    std.debug.print("Error writing to response: {any}\n", .{err});
+                };
+                return;
+            }
+        }
+        handler.handler(req, &resp);
         if (!resp.written) {
             resp.writeHeaders() catch |err| {
                 std.debug.panic("Error writing headers to response: {any}", .{err});
@@ -189,7 +269,8 @@ pub const Router = struct {
         }
     }
 
-    pub fn with_404_handler(self: *Router, handler: HttpHandler) void {
+    pub fn with_404_handler(self: *Router, handlerFunc: HttpHandlerFunc) void {
+        const handler = HttpHandler.init(handlerFunc);
         self.not_found_handler = handler;
     }
 
@@ -244,8 +325,6 @@ pub fn serveFile(req: HttpRequest, response: *HttpResponse) void {
         return;
     }
     const ext = std.fs.path.extension(path);
-    // const strip_ext = std.mem.trimLeft(u8, ext, ".");
-    // const content_type = guessContentType(strip_ext) orelse "text/plain";
     const content_type = mime.extension_map.get(ext) orelse mime.Type.@"text/plain";
     response.addHeaders(.{
         .{ "content-type", @tagName(content_type) },
