@@ -28,6 +28,7 @@ pub fn main() !void {
 ```
 3. Add the following to your build.zig to build your router and generate your `spin.toml`:
 ```zig
+const std = @import("std");
 const spin = @import("zig-fermyon-router");
 
 pub fn build(b: *std.Build) void {
