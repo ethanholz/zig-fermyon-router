@@ -1,6 +1,11 @@
 const std = @import("std");
 const mime = @import("mime");
 
+pub const HttpRequest = @import("request.zig").HttpRequest;
+pub const HttpResponse = @import("response.zig").HttpResponse;
+
+const serveFile = @import("static.zig").serveFile;
+
 /// A function that handles an HTTP request.
 pub const HttpHandlerFunc = *const fn (HttpRequest, *HttpResponse) void;
 
@@ -14,130 +19,23 @@ pub const HttpHandler = struct {
     }
 };
 
-/// A request to an HTTP server.
-pub const HttpRequest = struct {
-    reader: std.io.AnyReader = std.io.getStdIn().reader().any(),
-    envVars: std.process.EnvMap,
-
-    pub fn init(_: *std.mem.Allocator, env: std.process.EnvMap) HttpRequest {
-        return HttpRequest{ .envVars = env };
-    }
-
-    pub fn method(self: HttpRequest) ?[]const u8 {
-        return self.envVars.get("REQUEST_METHOD");
-    }
-
-    pub fn contentType(self: HttpRequest) ?[]const u8 {
-        return self.envVars.get("HTTP_CONTENT_TYPE");
-    }
-
-    pub fn contentLength(self: HttpRequest) !usize {
-        const content_length = self.envVars.get("CONTENT_LENGTH");
-        if (content_length == null) {
-            return 0;
-        }
-        return try std.fmt.parseInt(usize, content_length.?, 10);
-    }
-
-    pub fn pathInfo(self: HttpRequest) ?[]const u8 {
-        return self.envVars.get("PATH_INFO");
-    }
-};
-
-/// A response to an HTTP request.
-pub const HttpResponse = struct {
-    writer: std.io.AnyWriter = std.io.getStdOut().writer().any(),
-    headers: std.ArrayList(std.http.Header),
-    written: bool = false,
-    debug: bool = false,
-
-    pub fn init(allocator: *std.mem.Allocator, debug: bool) HttpResponse {
-        var headers = std.ArrayList(std.http.Header).init(allocator.*);
-        // Set the first header as the response status.
-        headers.append(std.http.Header{ .name = "Status", .value = "200 OK" }) catch |err| {
-            std.debug.panic("Error writing to response: {any}\n", .{err});
-        };
-        return HttpResponse{ .headers = headers, .debug = debug };
-    }
-
-    pub fn deinit(self: *HttpResponse) void {
-        self.headers.deinit();
-    }
-
-    pub fn writeHeader(self: *HttpResponse, status: std.http.Status) !void {
-        const allocator = std.heap.wasm_allocator;
-        const value = std.fmt.allocPrint(allocator, "{d} {s}", .{ @intFromEnum(status), status.phrase().? }) catch |err| {
-            std.debug.panic("Error formatting status: {any}\n", .{err});
-        };
-        self.headers.items[0] = std.http.Header{ .name = "Status", .value = value };
-        try self.writeHeaders();
-    }
-
-    fn writeHeaders(self: *HttpResponse) !void {
-        if (self.written) {
-            return;
-        }
-        for (self.headers.items) |header| {
-            try self.writer.print("{s}: {s}\n", .{ header.name, header.value });
-            if (self.debug) {
-                std.debug.print("{s}: {s}\n", .{ header.name, header.value });
-            }
-        }
-        try self.writer.print("\n", .{});
-        self.written = true;
-    }
-
-    pub fn addHeader(self: *HttpResponse, key: []const u8, value: []const u8) !void {
-        try self.headers.append(std.http.Header{ .name = key, .value = value });
-    }
-
-    pub fn addHeaders(self: *HttpResponse, headers: anytype) !void {
-        inline for (headers) |header| {
-            self.addHeader(header.@"0", header.@"1") catch |err| {
-                std.debug.print("Error writing to response: {any}\n", .{err});
-            };
-        }
-    }
-
-    pub fn write(self: *HttpResponse, comptime data: []const u8) !usize {
-        try self.writeHeaders();
-        return try self.writer.write(data);
-    }
-
-    pub fn print(self: *HttpResponse, comptime data: []const u8, args: anytype) !void {
-        outer: {
-            if (!self.written) {
-                const headers = self.headers;
-                for (headers.items) |header| {
-                    if (std.mem.eql(u8, header.name, "content-type")) {
-                        break :outer;
-                    }
-                }
-            }
-            // Set the content type to text/plain if it hasn't been set.
-            self.addHeader("content-type", "text/plain") catch |err| {
-                std.debug.print("Error writing to response: {any}\n", .{err});
-            };
-        }
-        try self.writeHeaders();
-        try self.writer.print(data, args);
-    }
-};
-
 pub const Router = struct {
+    usingnamespace @import("static.zig");
     routes: std.StringArrayHashMap(HttpHandler),
     not_found_handler: HttpHandler,
     debug: bool = false,
+    allocator: std.mem.Allocator,
 
     pub fn new(allocator: std.mem.Allocator) Router {
         const not_found_handler = HttpHandler.init(default_404_handler);
         return Router{
+            .allocator = allocator,
             .routes = std.StringArrayHashMap(HttpHandler).init(allocator),
             .not_found_handler = not_found_handler,
         };
     }
     pub fn withDebug(self: Router, debug: bool) Router {
-        return Router{ .routes = self.routes, .not_found_handler = self.not_found_handler, .debug = debug };
+        return Router{ .allocator = self.allocator, .routes = self.routes, .not_found_handler = self.not_found_handler, .debug = debug };
     }
 
     pub fn deinit(self: *Router) void {
@@ -151,30 +49,24 @@ pub const Router = struct {
     }
 
     pub fn createStaticRoutes(self: *Router, files: std.fs.Dir) !void {
-        // try self.add_route("/", serve_file);
-        // var dir_iter = files.iterate();
-        var dir_iter = try files.walk(std.heap.wasm_allocator);
+        var dir_iter = try files.walk(self.allocator);
         defer dir_iter.deinit();
-        try self.addRoute("/", serveFile);
+        try self.addRoute("/", Router.serveFile);
         while (try dir_iter.next()) |entry| {
-            // const name = entry.basename;
             const name = entry.path;
-            // std.debug.print("name: {s}\n", .{name});
-            // const name = entry.name;
             if (entry.kind == std.fs.File.Kind.directory) {
-                const concat = std.mem.concat(std.heap.wasm_allocator, u8, &[_][]const u8{ "/", name, "/" }) catch |err| {
+                const concat = std.mem.concat(self.allocator, u8, &[_][]const u8{ "/", name, "/" }) catch |err| {
                     std.debug.print("Error formatting path: {any}\n", .{err});
                     return;
                 };
-                // std.debug.print("concat: {s}\n", .{concat});
-                try self.addRoute(concat, serveFile);
+                try self.addRoute(concat, Router.serveFile);
                 continue;
             }
-            const concat = std.mem.concat(std.heap.wasm_allocator, u8, &[_][]const u8{ "/", name }) catch |err| {
+            const concat = std.mem.concat(self.allocator, u8, &[_][]const u8{ "/", name }) catch |err| {
                 std.debug.print("Error formatting path: {any}\n", .{err});
                 return;
             };
-            try self.addRoute(concat, serveFile);
+            try self.addRoute(concat, Router.serveFile);
         }
     }
 
@@ -193,7 +85,7 @@ pub const Router = struct {
         }
         const mets = &entry.?.value_ptr.methods;
         if (mets.* == null) {
-            mets.* = std.ArrayList(std.http.Method).init(std.heap.wasm_allocator);
+            mets.* = std.ArrayList(std.http.Method).init(self.allocator);
         }
         try mets.*.?.append(met);
     }
@@ -205,7 +97,7 @@ pub const Router = struct {
         }
         const internal_methods = &entry.?.value_ptr.methods;
         if (internal_methods.* == null) {
-            internal_methods.* = std.ArrayList(std.http.Method).init(std.heap.wasm_allocator);
+            internal_methods.* = std.ArrayList(std.http.Method).init(self.allocator);
         }
         inline for (mets) |met| {
             if (@TypeOf(met) != std.http.Method) {
@@ -217,18 +109,20 @@ pub const Router = struct {
         }
     }
 
-    pub fn routeRequest(self: *Router, allocator: *std.mem.Allocator) !void {
-        var envMap = try std.process.getEnvMap(allocator.*);
+    pub fn routeRequest(self: *Router) !void {
+        var envMap = try std.process.getEnvMap(self.allocator);
         defer envMap.deinit();
         const route = envMap.get("PATH_INFO").?;
         var handler = self.routes.get(route) orelse self.not_found_handler;
-        var resp = HttpResponse.init(allocator, self.debug);
-        const req = HttpRequest.init(allocator, envMap);
+        const log = std.log.scoped(.request);
+        log.info("Request for {s}", .{route});
+        var resp = HttpResponse.init(&self.allocator);
+        const req = HttpRequest.init(&self.allocator, envMap);
         // TODO: This is less than ideal, might want to look at using a context to pass and chain middlewares.
         if (handler.handler == self.not_found_handler.handler) {
             const last = route[route.len - 1];
             if (last != '/') {
-                const concat = std.mem.concat(allocator.*, u8, &[_][]const u8{ route, "/" }) catch |err| {
+                const concat = std.mem.concat(self.allocator, u8, &[_][]const u8{ route, "/" }) catch |err| {
                     std.debug.print("Error formatting path: {any}\n", .{err});
                     return;
                 };
@@ -244,9 +138,8 @@ pub const Router = struct {
                 }
             }
         }
-        if (self.debug) {
-            std.debug.print("handler: {any}\n", .{handler.methods});
-        }
+        log.debug("handler methods: {any}", .{handler.methods});
+        log.debug("handler: {any}", .{handler.handler});
         outer: {
             if (handler.methods != null) {
                 const met = std.http.Method.parse(req.method().?);
@@ -261,12 +154,14 @@ pub const Router = struct {
                 return;
             }
         }
+        resp.log.debug("Calling handler for {s}", .{route});
         handler.handler(req, &resp);
         if (!resp.written) {
             resp.writeHeaders() catch |err| {
                 std.debug.panic("Error writing headers to response: {any}", .{err});
             };
         }
+        resp.log.debug("Finished handling request for {s}", .{route});
     }
 
     pub fn with_404_handler(self: *Router, handlerFunc: HttpHandlerFunc) void {
@@ -287,65 +182,3 @@ pub const Router = struct {
         };
     }
 };
-
-pub fn serveFile(req: HttpRequest, response: *HttpResponse) void {
-    const allocator = std.heap.wasm_allocator;
-    const path = req.pathInfo().?;
-    const strip = std.mem.trimLeft(u8, path, "/");
-    const last = path[path.len - 1];
-    if (last == '/') {
-        response.addHeaders(.{
-            .{ "content-type", "text/html" },
-            .{ "cache-control", "public, max-age=60" },
-        }) catch |err| {
-            std.debug.print("Error writing to response: {any}\n", .{err});
-        };
-        response.writeHeader(std.http.Status.ok) catch |err| {
-            std.debug.print("Error writing to response: {any}\n", .{err});
-        };
-
-        const full = std.mem.concat(allocator, u8, &[_][]const u8{ strip, "index.html" }) catch |err| {
-            std.debug.print("Error formatting path: {any}\n", .{err});
-            return;
-        };
-        // std.debug.print("full: {s}\n", .{full});
-        const file = std.fs.cwd().openFile(full, .{}) catch |err| {
-            std.debug.print("Error opening file: {any}\n", .{err});
-            return;
-        };
-        const reader = file.reader();
-        const contents = reader.readAllAlloc(allocator, std.math.maxInt(usize)) catch |err| {
-            std.debug.print("Error reading file: {any}\n", .{err});
-            return;
-        };
-        response.print("{s}", .{contents}) catch |err| {
-            std.debug.print("Error writing to response: {any}\n", .{err});
-        };
-
-        return;
-    }
-    const ext = std.fs.path.extension(path);
-    const content_type = mime.extension_map.get(ext) orelse mime.Type.@"text/plain";
-    response.addHeaders(.{
-        .{ "content-type", @tagName(content_type) },
-        .{ "cache-control", "public, max-age=60" },
-    }) catch |err| {
-        std.debug.print("Error writing to response: {any}\n", .{err});
-    };
-    response.writeHeader(std.http.Status.ok) catch |err| {
-        std.debug.print("Error writing to response: {any}\n", .{err});
-    };
-    const file = std.fs.cwd().openFile(strip, .{}) catch |err| {
-        std.debug.print("Error opening file: {any}\n", .{err});
-        return;
-    };
-    const reader = file.reader();
-    const contents = reader.readAllAlloc(allocator, std.math.maxInt(usize)) catch |err| {
-        std.debug.print("Error reading file: {any}\n", .{err});
-        return;
-    };
-    response.print("{s}", .{contents}) catch |err| {
-        std.debug.print("Error writing to response: {any}\n", .{err});
-    };
-    return;
-}
