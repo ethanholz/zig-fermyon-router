@@ -19,11 +19,11 @@ pub fn testHandler(_: HttpRequest, response: *HttpResponse) void {
 ```zig
 pub fn main() !void {
     var allocator = std.heap.wasm_allocator;
-    var router = Router.new(allocator).withDebug(true);
+    var router = Router.new(allocator);
     defer router.deinit();
 
     try router.addRoute("/api/testing", testHandler);
-    try router.routeRequest(&allocator);
+    try router.routeRequest();
 }
 ```
 3. Add the following to your build.zig to build your router and generate your `spin.toml`:
