@@ -44,7 +44,7 @@
           '';
         };
         devShell = pkgs.mkShell {
-          buildInputs = [ packages.fermyon-router.nativeBuildInputs ];
+          buildInputs = [ packages.fermyon-router.nativeBuildInputs pkgs.fermyon-spin];
         };
 
       }
