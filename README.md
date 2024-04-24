@@ -8,6 +8,13 @@ The purpose of this project is to provide a simple, Go-like interface for buildi
 **Note**: You can also try this out using Nix but cloning the repo and then running `nix develop`
 
 ## Getting Started
+0. Add your imports
+```zig
+const fermyon_router = @import("zig-fermyon-router");
+const HttpRequest = fermyon_router.HttpRequest;
+const HttpResponse = fermyon_router.HttpResponse;
+const Router = fermyon_router.Router;
+```
 1. Build a route handler like.
 ```zig
 pub fn testHandler(_: HttpRequest, response: *HttpResponse) void {
