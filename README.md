@@ -4,6 +4,7 @@ The purpose of this project is to provide a simple, Go-like interface for buildi
 ## Requirements
 - Zig 0.12.0
 - Fermyon Spin
+
 **Note**: You can also try this out using Nix but cloning the repo and then running `nix develop`
 
 ## Getting Started
