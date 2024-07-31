@@ -84,14 +84,14 @@ pub fn build(b: *std.Build) void {
 
     // Create a module for the router
     const module = b.addModule("zig-fermyon-router", .{
-        .root_source_file = .{ .path = "src/root.zig" },
+        .root_source_file = b.path("src/root.zig"),
     });
     module.addImport("mime", mime.module("mime"));
 
     // Build the main executable for testing
     const exe = b.addExecutable(.{
         .name = "zig-fermyon-router",
-        .root_source_file = .{ .path = "src/main.zig" },
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -111,7 +111,7 @@ pub fn build(b: *std.Build) void {
     // other.step.dependOn(&exe.step);
 
     const exe_unit_tests = b.addTest(.{
-        .root_source_file = .{ .path = "src/main.zig" },
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });

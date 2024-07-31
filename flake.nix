@@ -21,7 +21,7 @@
     flake-utils.lib.eachSystem systems (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        zig = zig-overlay.packages.${system}."0.12.0";
+        zig = zig-overlay.packages.${system}."0.13.0";
       in
       rec {
         formatter = nixpkgs.legacyPackages.${system}.nixpkgs-fmt;
